@@ -5,8 +5,8 @@
 #include <vector>
 
 std::int64_t solve_part2(const Grid& g) {
-  // Part 2 repeatedly removes accessible rolls (<4 neighbors) until stable.
-  // This is equivalent to peeling the 4-core of the 8-neighbor adjacency graph.
+  // Part 2 essentially removes accessible rolls, which is defined by < 4 neighbors, until stable.
+  // This is an equivalent problem to peeling the 4 core of the 8 neighbor adjacency graph.
   std::vector<std::uint8_t> alive = g.cell;
   std::vector<std::uint8_t> deg = convolve_8_neighbors(g);
 
@@ -48,5 +48,3 @@ std::int64_t solve_part2(const Grid& g) {
 
   return removed;
 }
-
-

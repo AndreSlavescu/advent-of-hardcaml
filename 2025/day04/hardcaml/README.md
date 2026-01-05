@@ -1,21 +1,16 @@
-## AoC 2025 Day 4 (Printing Department) — Hardcaml starter
+## AoC 2025 Day 4 problem HDL
 
-This is a small Hardcaml project scaffold for Day 4. It includes:
+Hardcaml solution for day 4.
 
-- The **C++ solver** under `../cpp/` is treated as the *golden model* for correctness.
-- An **RTL module** (`src/day04_rtl.ml`) implementing **Part 1 + Part 2** with a realistic ready/valid interface.
-- A **Verilog generator** (`bin/generate.ml`) following Jane Street’s Hardcaml template conventions.
+### Install
 
-### Install the OCaml + Hardcaml toolchain
+Since this repo doesn’t assume OCaml tooling is installed. The Jane Street template recommends
+using OxCaml, but you're free to also use stock OCaml if you prefer. Install the OCaml + Hardcaml toolchain to run this project by visiting the following references:
 
-This repo doesn’t assume OCaml tooling is installed. The Jane Street template recommends
-using OxCaml, but you can also use stock OCaml if you prefer.
-
-See:
 - `https://oxcaml.org/get-oxcaml/`
 - `https://raw.githubusercontent.com/janestreet/hardcaml_template_project/with-extensions/README.md`
 
-Typical opam installs (non-interactive):
+opam installs:
 
 ```bash
 opam install -y hardcaml hardcaml_waveterm hardcaml_step_testbench ppx_hardcaml
@@ -24,15 +19,12 @@ opam install -y core core_unix ppx_jane rope re dune
 
 ### Build
 
-From this directory:
-
 ```bash
+cd 2025/day04/hardcaml
 dune build bin/generate.exe
 ```
 
-### Simulate the RTL
-
-This drives the RTL with ready/valid and prints the answer:
+### Simulating the RTL
 
 ```bash
 dune exec ./bin/sim.exe -- --part1 < input.txt
@@ -45,4 +37,32 @@ dune exec ./bin/sim.exe -- --part2 < input.txt
 dune exec ./bin/generate.exe
 ```
 
+### Verilator Simulation
 
+First make sure you have verilator installed.
+
+```bash
+cd 2025/day04/hardcaml/verilator
+dune exec ../bin/generate.exe > day04.v
+verilator --cc day04.v --exe sim_main.cpp -O3 --build -j 4 -Wno-COMBDLY
+./obj_dir/Vday04 --part2 < ../../day4_input.txt
+```
+
+### Scale Test
+
+Compare C++ reference implementation against Verilator simulation at various grid scales:
+
+```bash
+cd 2025/day04
+python3 scale_test.py --part2 --scales 1 5 10
+```
+
+### Direct Bash Script
+
+```bash
+cd 2025/day04
+./run_rtl.sh --part1 # part 1 (RTL sim only)
+./run_rtl.sh --part2 # part 2 (RTL sim only)
+./run_rtl.sh --part1 --scale-test # part 1 with scale test
+./run_rtl.sh --part2 --scale-test # part 2 with scale test
+```

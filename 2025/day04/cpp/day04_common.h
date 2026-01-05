@@ -22,5 +22,3 @@ Grid read_grid(std::istream& in);
 std::vector<std::uint8_t> convolve_8_neighbors(const Grid& g);
 
 inline int grid_index(int r, int c, int w) { return r * w + c; }
-
-

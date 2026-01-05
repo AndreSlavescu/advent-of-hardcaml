@@ -11,5 +11,3 @@ std::int64_t solve_part1(const Grid& g) {
   }
   return accessible;
 }
-
-

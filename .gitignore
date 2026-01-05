@@ -8,6 +8,9 @@
 *.exe
 *.out
 /2025/day04/cpp/day04
+/2025/day04/hardcaml/verilator/obj_dir/
+/2025/day04/hardcaml/verilator/day04.v
+/2025/day04/hardcaml/verilator/day04_verilator
 **/_build/
 *.cmi
 *.cmo
