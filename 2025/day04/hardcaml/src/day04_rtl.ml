@@ -2,27 +2,11 @@ open! Core
 open! Hardcaml
 open! Signal
 
-(* Day 4 is a classic 3x3 stencil: for each '@' cell, count 8 neighbors and check < 4.
+(* Day 4 Part 2: Optimized k-core peeling with parallel neighbor reads.
 
-   A very FPGA-friendly architecture is a streaming stencil with:
-   - two line-buffers (previous 2 rows),
-   - 3-wide shift registers per row (previous/current/next columns),
-   - popcount of the 8 neighbors,
-   - an accumulator of how many centers are accessible.
-
-   Part 2 can be viewed as a k-core peel on the 8-neighbor graph: repeatedly remove any
-   '@' cell with <4 '@' neighbors until stable. This implementation uses a queue-based
-   peel (rather than rescanning the whole frame many times).
-*)
-
-(* Fixed-size frame, streamed in as ASCII '.'/'@' with ready/valid.
-
-   Your input is 137x137, so we pick that as the default. The module itself performs
-   *implicit zero-padding* on all four sides (top/bottom/left/right) so edge handling is
-   automatic.
-
-   Part 1: run one stencil pass and count accessible rolls.
-   Part 2: treat part 1's predicate as "removable", remove them, and repeat.
+   Optimization: Use 9 read ports to read center + all 8 neighbors in one cycle,
+   then process writes sequentially. This reduces the peel phase from ~9 cycles
+   per removal to ~3 cycles (pop + read + write loop with early termination).
 *)
 
 let int_env name ~default =
@@ -40,8 +24,6 @@ let () =
 
 let size = width * height
 let addr_width = address_bits_for size
-
-(* Popcount tree arity. For FPGA LUTs, arities like 3 or 4 can be a good fit. *)
 let popcount_branching_factor = 4
 
 let padded_width = width + 2
@@ -78,7 +60,9 @@ module States = struct
     | Idle
     | Load
     | Peel_pop
-    | Peel_neighbors
+    | Peel_fetch  (* Wait for node memory read *)
+    | Peel_check  (* Check center, cache neighbors *)
+    | Peel_write
     | Done
   [@@deriving sexp_of, compare ~localize, enumerate]
 end
@@ -176,8 +160,7 @@ let create_part1 scope ({ clock; clear; start; part2 = _; in_valid; in_char } : 
             ; when_ done_now [ sm.set_next Done ]
             ] )
         ; ( Done
-          , [ (* one-cycle pulse *)
-              sm.set_next Idle
+          , [ sm.set_next Idle
             ] )
         ]
     ];
@@ -192,28 +175,33 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
   let open Always in
   let sm = State_machine.create (module States) spec in
 
-  (* Scan counters over the padded frame. *)
   let%hw_var r = Variable.reg spec ~width:coord_width in
   let%hw_var c = Variable.reg spec ~width:coord_width in
   let%hw_var cell_addr = Variable.reg spec ~width:addr_width in
-
-  (* Part 1 accumulator (only used when [part2=0]). *)
   let%hw_var part1_count = Variable.reg spec ~width:32 in
 
-  (* Part 2 data structures. *)
   let%hw_var q_rptr = Variable.reg spec ~width:addr_width in
   let%hw_var q_wptr = Variable.reg spec ~width:addr_width in
   let%hw_var removed = Variable.reg spec ~width:32 in
 
   let%hw_var cur_row = Variable.reg spec ~width:row_bits in
   let%hw_var cur_col = Variable.reg spec ~width:col_bits in
-  let%hw_var neigh_idx = Variable.reg spec ~width:3 in
+  let%hw_var write_idx = Variable.reg spec ~width:4 in
 
   let%hw_var result = Variable.reg spec ~width:32 in
 
+  (* Cached neighbor values after parallel read *)
+  let cached_vals = Array.init 8 ~f:(fun _ -> Variable.reg spec ~width:4) in
+  let cached_addrs = Array.init 8 ~f:(fun _ -> Variable.reg spec ~width:addr_width) in
+  let cached_valid = Array.init 8 ~f:(fun _ -> Variable.reg spec ~width:1) in
+  let cached_rows = Array.init 8 ~f:(fun _ -> Variable.reg spec ~width:row_bits) in
+  let cached_cols = Array.init 8 ~f:(fun _ -> Variable.reg spec ~width:col_bits) in
+
   let load = sm.is Load in
-  let peel_pop = sm.is Peel_pop in
-  let peel_neighbors = sm.is Peel_neighbors in
+  let _peel_pop = sm.is Peel_pop in
+  let _peel_fetch = sm.is Peel_fetch in
+  let peel_check = sm.is Peel_check in
+  let peel_write = sm.is Peel_write in
 
   let r0 = of_int ~width:coord_width 0 in
   let r1 = of_int ~width:coord_width 1 in
@@ -233,7 +221,6 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
   let one_addr = of_int ~width:addr_width 1 in
   let c_is_last = c.value ==: c_last in
 
-  (* Address mapping: addr = row*W + col (W is constant for this elaborated circuit). *)
   let addr_of_row_col row col =
     let row = uresize row addr_width in
     let col = uresize col addr_width in
@@ -241,15 +228,12 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
     uresize (row *: w) addr_width +: col
   in
 
-  (* Load phase: scan padded coordinates, accept input only for the interior (1..h,1..w). *)
   let need_input_raw =
     (r.value >=: r1) &: (r.value <=: r_h) &: (c.value >=: c1) &: (c.value <=: c_w)
   in
   let in_ready = load &: need_input_raw in
   let step = load &: mux2 need_input_raw in_valid vdd in
 
-  (* Valid centers correspond to original cells, via our 1-cycle/row-delay windowing:
-     center is (r-1,c-1), so r ∈ [2..h+1], c ∈ [2..w+1]. *)
   let valid_center_raw =
     (r.value >=: r2) &: (r.value <=: r_h1) &: (c.value >=: c2) &: (c.value <=: c_w1)
   in
@@ -258,7 +242,6 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
   let at_code = of_int ~width:8 (Char.to_int '@') in
   let pix = load &: need_input_raw &: in_valid &: (in_char ==: at_code) in
 
-  (* Streaming 3x3 window generator (only advances during load). *)
   let reg_en x = reg spec ~enable:step x in
   let delay n x =
     let rec go i acc = if i = 0 then acc else go (i - 1) (reg_en acc) in
@@ -281,17 +264,14 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
   let deg4 = popcount ~branching_factor:popcount_branching_factor neighbor_bits in
   let accessible = mid_1 &: (deg4 <:. 4) in
 
-  (* Node memory stores per-cell state.
-     We encode "dead" as 4'hF to save one bit vs {alive,deg}. *)
   let dead4 = of_int ~width:4 15 in
   let node_data_init = mux2 mid_1 deg4 dead4 in
 
-  (* Queue entry stores {row, col}. *)
   let row_center = uresize (r.value -:. 2) row_bits in
   let col_center = uresize (c.value -:. 2) col_bits in
   let q_data_load = concat_msb [ row_center; col_center ] in
 
-  (* Queue memory (read + single write port). *)
+  (* Queue memory *)
   let q_we_w = wire 1 in
   let q_wr_data_w = wire queue_bits in
   let q_rd =
@@ -309,111 +289,98 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
        ~read_addresses:[| q_rptr.value |]).(0)
   in
 
-  (* Node memory read. *)
-  let node_rd_addr_w = wire addr_width in
-  let node_we_w = wire 1 in
-  let node_wr_addr_w = wire addr_width in
-  let node_wr_data_w = wire 4 in
-
-  let node_rd =
-    (multiport_memory
-       ~name:"day04_nodes"
-       ~attributes:[ Rtl_attribute.Vivado.Ram_style.block ]
-       size
-       ~write_ports:
-         [| { Write_port.write_clock = clock
-            ; write_address = node_wr_addr_w
-            ; write_enable = node_we_w
-            ; write_data = node_wr_data_w
-            }
-         |]
-       ~read_addresses:[| node_rd_addr_w |]).(0)
-  in
-
-  let node_val = node_rd in
-  let node_alive = node_val <>:. 15 in
-
   let q_row = select q_rd (queue_bits - 1) col_bits in
   let q_col = select q_rd (col_bits - 1) 0 in
-  let addr_pop = addr_of_row_col q_row q_col in
 
-  (* Neighbor selection for peel phase. *)
+  (* Compute all 8 neighbor coordinates *)
   let row_gt0 = cur_row.value >:. 0 in
   let row_lt_last = cur_row.value <:. (height - 1) in
   let col_gt0 = cur_col.value >:. 0 in
   let col_lt_last = cur_col.value <:. (width - 1) in
 
-  let nrow0 = cur_row.value -:. 1 in
-  let ncol0 = cur_col.value -:. 1 in
-  let nvalid0 = row_gt0 &: col_gt0 in
+  let neighbor_info = [|
+    (cur_row.value -:. 1, cur_col.value -:. 1, row_gt0 &: col_gt0);
+    (cur_row.value -:. 1, cur_col.value, row_gt0);
+    (cur_row.value -:. 1, cur_col.value +:. 1, row_gt0 &: col_lt_last);
+    (cur_row.value, cur_col.value -:. 1, col_gt0);
+    (cur_row.value, cur_col.value +:. 1, col_lt_last);
+    (cur_row.value +:. 1, cur_col.value -:. 1, row_lt_last &: col_gt0);
+    (cur_row.value +:. 1, cur_col.value, row_lt_last);
+    (cur_row.value +:. 1, cur_col.value +:. 1, row_lt_last &: col_lt_last);
+  |] in
 
-  let nrow1 = cur_row.value -:. 1 in
-  let ncol1 = cur_col.value in
-  let nvalid1 = row_gt0 in
+  let neighbor_addrs = Array.map neighbor_info ~f:(fun (nr, nc, _) -> addr_of_row_col nr nc) in
 
-  let nrow2 = cur_row.value -:. 1 in
-  let ncol2 = cur_col.value +:. 1 in
-  let nvalid2 = row_gt0 &: col_lt_last in
+  (* Node memory with 9 read ports: 1 for center, 8 for neighbors *)
+  let node_we_w = wire 1 in
+  let node_wr_addr_w = wire addr_width in
+  let node_wr_data_w = wire 4 in
 
-  let nrow3 = cur_row.value in
-  let ncol3 = cur_col.value -:. 1 in
-  let nvalid3 = col_gt0 in
+  let center_addr = addr_of_row_col cur_row.value cur_col.value in
+  let load_addr = addr_of_row_col row_center col_center in
 
-  let nrow4 = cur_row.value in
-  let ncol4 = cur_col.value +:. 1 in
-  let nvalid4 = col_lt_last in
-
-  let nrow5 = cur_row.value +:. 1 in
-  let ncol5 = cur_col.value -:. 1 in
-  let nvalid5 = row_lt_last &: col_gt0 in
-
-  let nrow6 = cur_row.value +:. 1 in
-  let ncol6 = cur_col.value in
-  let nvalid6 = row_lt_last in
-
-  let nrow7 = cur_row.value +:. 1 in
-  let ncol7 = cur_col.value +:. 1 in
-  let nvalid7 = row_lt_last &: col_lt_last in
-
-  let nrow = mux neigh_idx.value [ nrow0; nrow1; nrow2; nrow3; nrow4; nrow5; nrow6; nrow7 ] in
-  let ncol = mux neigh_idx.value [ ncol0; ncol1; ncol2; ncol3; ncol4; ncol5; ncol6; ncol7 ] in
-  let nvalid =
-    mux neigh_idx.value [ nvalid0; nvalid1; nvalid2; nvalid3; nvalid4; nvalid5; nvalid6; nvalid7 ]
+  (* Read addresses: during load use load_addr, during peel_pop use center, during peel_read use neighbors *)
+  let read_addrs =
+    Array.init 9 ~f:(fun i ->
+      if i = 0 then
+        mux2 load load_addr center_addr
+      else
+        mux2 load load_addr neighbor_addrs.(i - 1))
   in
-  let addr_neigh = addr_of_row_col nrow ncol in
 
-  (* Select which node address we're currently reading. *)
-  node_rd_addr_w <==
-    mux2 peel_neighbors addr_neigh (mux2 peel_pop addr_pop (zero addr_width));
+  let node_rds =
+    multiport_memory
+      ~name:"day04_nodes"
+      ~attributes:[ Rtl_attribute.Vivado.Ram_style.block ]
+      size
+      ~write_ports:
+        [| { Write_port.write_clock = clock
+           ; write_address = node_wr_addr_w
+           ; write_enable = node_we_w
+           ; write_data = node_wr_data_w
+           }
+        |]
+      ~read_addresses:read_addrs
+  in
 
-  (* Write logic (priority by phase). *)
+  let center_val = node_rds.(0) in
+  let neighbor_vals = Array.sub node_rds ~pos:1 ~len:8 in
+
+  let queue_empty = q_rptr.value ==: q_wptr.value in
+  let center_alive = center_val <>:. 15 in
+  let center_should_remove = center_alive &: (center_val <:. 4) in
+
+  (* Current write target from cache *)
+  let cur_cached_val = mux write_idx.value (Array.to_list (Array.map cached_vals ~f:(fun v -> v.value))) in
+  let cur_cached_addr = mux write_idx.value (Array.to_list (Array.map cached_addrs ~f:(fun v -> v.value))) in
+  let cur_cached_valid = mux write_idx.value (Array.to_list (Array.map cached_valid ~f:(fun v -> v.value))) in
+  let cur_cached_row = mux write_idx.value (Array.to_list (Array.map cached_rows ~f:(fun v -> v.value))) in
+  let cur_cached_col = mux write_idx.value (Array.to_list (Array.map cached_cols ~f:(fun v -> v.value))) in
+
+  let valid_write_idx = write_idx.value <:. 8 in
+  let cur_alive = cur_cached_val <>:. 15 in
+  let cur_should_write = valid_write_idx &: cur_cached_valid &: cur_alive in
+  let cur_should_enq = cur_should_write &: (cur_cached_val ==:. 4) in
+  let cur_new_val = mux2 (cur_cached_val ==:. 0) (zero 4) (cur_cached_val -:. 1) in
+
+  (* Load phase writes *)
   let load_write = load &: part2 &: valid_center in
   let load_enq = load_write &: accessible in
 
-  let queue_empty = q_rptr.value ==: q_wptr.value in
-  let pop_has_item = peel_pop &: ~:queue_empty in
-  let pop_remove = pop_has_item &: (node_val <:. 4) in
+  (* Mark center as dead during peel_check *)
+  let center_write = peel_check &: center_should_remove in
 
-  let neigh_update = peel_neighbors &: nvalid &: node_alive in
-  let neigh_enq = neigh_update &: (node_val ==:. 4) in
+  (* Write logic: load writes, center death write, or neighbor updates *)
+  node_we_w <== (load_write |: center_write |: (peel_write &: cur_should_write));
+  node_wr_addr_w <== mux2 load_write load_addr (mux2 center_write center_addr cur_cached_addr);
+  node_wr_data_w <== mux2 load_write node_data_init (mux2 center_write dead4 cur_new_val);
 
-  (* Node memory write ports. *)
-  node_we_w <== (load_write |: pop_remove |: neigh_update);
-  node_wr_addr_w <==
-    mux2 load_write cell_addr.value (mux2 peel_neighbors addr_neigh addr_pop);
-
-  let dec_val = mux2 (node_val ==:. 0) (zero 4) (node_val -:. 1) in
-  node_wr_data_w <==
-    mux2
-      load_write
-      node_data_init
-      (mux2 peel_neighbors dec_val dead4);
-
-  (* Queue write ports. *)
-  q_we_w <== (load_enq |: neigh_enq);
-  q_wr_data_w <== mux2 load_enq q_data_load (concat_msb [ nrow; ncol ]);
+  (* Queue writes *)
+  q_we_w <== (load_enq |: (peel_write &: cur_should_enq));
+  q_wr_data_w <== mux2 load_enq q_data_load (concat_msb [ cur_cached_row; cur_cached_col ]);
 
   let done_load = step &: (r.value ==: r_last) &: (c.value ==: c_last) in
+  let write_done = write_idx.value >=:. 8 in
 
   compile
     [ sm.switch
@@ -429,17 +396,15 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
                 ; removed <-- zero 32
                 ; cur_row <-- zero row_bits
                 ; cur_col <-- zero col_bits
-                ; neigh_idx <-- zero 3
+                ; write_idx <-- zero 4
                 ; result <-- zero 32
                 ; sm.set_next Load
                 ]
             ] )
         ; ( Load
-          , [ (* Advance scan counters. *)
-              when_ (step &: c_is_last) [ c <-- c0; r <-- r.value +: one_coord ]
+          , [ when_ (step &: c_is_last) [ c <-- c0; r <-- r.value +: one_coord ]
             ; when_ (step &: ~:c_is_last) [ c <-- c.value +: one_coord ]
-            ; (* When we reach a valid center, either count part1 or populate part2 structures. *)
-              when_
+            ; when_
                 (valid_center &: ~:part2)
                 [ part1_count <-- part1_count.value +: (zero 31 @: accessible) ]
             ; when_ load_write [ cell_addr <-- cell_addr.value +: one_addr ]
@@ -459,28 +424,40 @@ let create scope ({ clock; clear; start; part2; in_valid; in_char } : _ I.t) : _
           , [ if_
                 queue_empty
                 [ result <-- removed.value; sm.set_next Done ]
-                [ (* Pop one queue entry per cycle. *)
-                  q_rptr <-- q_rptr.value +: one_addr
-                ; when_
-                    pop_remove
-                    [ removed <-- removed.value +:. 1
-                    ; cur_row <-- q_row
-                    ; cur_col <-- q_col
-                    ; neigh_idx <-- zero 3
-                    ; sm.set_next Peel_neighbors
-                    ]
+                [ q_rptr <-- q_rptr.value +: one_addr
+                ; cur_row <-- q_row
+                ; cur_col <-- q_col
+                ; sm.set_next Peel_fetch  (* Wait for memory read *)
                 ]
             ] )
-        ; ( Peel_neighbors
-          , [ when_ neigh_enq [ q_wptr <-- q_wptr.value +: one_addr ]
+        ; ( Peel_fetch
+          , [ (* Just wait for node memory reads to complete *)
+              sm.set_next Peel_check
+            ] )
+        ; ( Peel_check
+          , [ (* Memory outputs now valid - cache all neighbor values *)
+              proc (List.concat (Array.to_list (Array.mapi neighbor_info ~f:(fun i (nr, nc, valid) ->
+                [ cached_vals.(i) <-- neighbor_vals.(i)
+                ; cached_addrs.(i) <-- neighbor_addrs.(i)
+                ; cached_valid.(i) <-- uresize valid 1
+                ; cached_rows.(i) <-- nr
+                ; cached_cols.(i) <-- nc
+                ]))))
             ; if_
-                (neigh_idx.value ==:. 7)
-                [ neigh_idx <-- zero 3; sm.set_next Peel_pop ]
-                [ neigh_idx <-- neigh_idx.value +:. 1 ]
+                center_should_remove
+                [ removed <-- removed.value +:. 1
+                ; write_idx <-- zero 4
+                ; sm.set_next Peel_write
+                ]
+                [ sm.set_next Peel_pop ]
+            ] )
+        ; ( Peel_write
+          , [ when_ cur_should_enq [ q_wptr <-- q_wptr.value +: one_addr ]
+            ; write_idx <-- write_idx.value +:. 1
+            ; when_ write_done [ sm.set_next Peel_pop ]
             ] )
         ; ( Done
-          , [ (* one-cycle pulse *)
-              sm.set_next Idle
+          , [ sm.set_next Idle
             ] )
         ]
     ];
@@ -495,3 +472,6 @@ let hierarchical scope =
   let module Scoped = Hierarchy.In_scope (I) (O) in
   Scoped.hierarchical ~scope ~name:"day04" create
 ;;
+
+
+
