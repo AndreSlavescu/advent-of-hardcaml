@@ -2,6 +2,28 @@
 
 This is implemented in C++ as a baseline reference to validate the hardcaml solution. It is also used as an inspiration for the HDL solution as well.
 
+### Requirements
+
+- **g++** with C++20 support (g++ 10+ or clang++ 10+)
+
+**macOS**
+
+Install with homebrew
+```bash
+brew install gcc
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get update
+sudo apt-get install g++
+```
+
+**Fedora:**
+```bash
+sudo dnf install gcc-c++
+```
+
 ### Direct Bash Script
 
 ```bash
