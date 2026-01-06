@@ -83,36 +83,29 @@ def main() -> int:
     print()
     print("H,W,scale,cpp_seconds,hdl_seconds,output_matches")
 
-    rtl_max_cells = 5_000_000
-
     for scale in args.scales:
         if scale <= 0:
             continue
 
         h = base_h * scale
         w = base_w * scale
-        cells = h * w
 
         block_lines = [(ln * scale) for ln in base_lines]
         block_bytes = ("\n".join(block_lines) + "\n").encode()
 
-        t0 = time.perf_counter()
+        t0 = time.perf_counter_ns()
         cpp_out = run_cmd_stream([str(cpp_bin), mode], block_bytes, repeats=scale)
-        t1 = time.perf_counter()
+        t1 = time.perf_counter_ns()
 
-        if cells <= rtl_max_cells:
-            env = dict(opam_env, DAY04_WIDTH=str(w), DAY04_HEIGHT=str(h))
+        env = dict(opam_env, DAY04_WIDTH=str(w), DAY04_HEIGHT=str(h))
+        verilator_bin = build_verilator(hc_dir, env)
 
-            verilator_bin = build_verilator(hc_dir, env)
+        t2 = time.perf_counter_ns()
+        verilator_out = run_cmd_stream([str(verilator_bin), mode], block_bytes, repeats=scale)
+        t3 = time.perf_counter_ns()
 
-            t2 = time.perf_counter()
-            verilator_out = run_cmd_stream([str(verilator_bin), mode], block_bytes, repeats=scale)
-            t3 = time.perf_counter()
-
-            ok = "yes" if cpp_out == verilator_out else "no"
-            print(f"{h},{w},{scale},{t1 - t0:.6f},{t3 - t2:.6f},{ok}")
-        else:
-            print(f"{h},{w},{scale},{t1 - t0:.6f},n/a,rtl_skipped")
+        ok = "yes" if cpp_out == verilator_out else "no"
+        print(f"{h},{w},{scale},{(t1 - t0) / 1e9:.6f},{(t3 - t2) / 1e9:.6f},{ok}")
 
     return 0
 
