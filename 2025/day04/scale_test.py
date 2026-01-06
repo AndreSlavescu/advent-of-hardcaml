@@ -81,7 +81,7 @@ def main() -> int:
 
     print(f"mode: {mode}")
     print()
-    print("H,W,scale,cpp_seconds,hdl_seconds,ok")
+    print("H,W,scale,cpp_seconds,hdl_seconds,output_matches")
 
     rtl_max_cells = 5_000_000
 
