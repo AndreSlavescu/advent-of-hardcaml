@@ -18,7 +18,7 @@ brew install clang-format # on mac
 sudo apt install clang-format # on linux
 
 # ocaml formatter / linter
-opam install -y ocamlformat
+opam install -y ocamlformat dune
 ```
 
 ### Makefile Rules
