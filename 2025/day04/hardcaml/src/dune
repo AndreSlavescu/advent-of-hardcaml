@@ -1,5 +1,6 @@
 (library
  (name day04)
+ (modules day04_rtl)
  (libraries core hardcaml)
  (preprocess
   (pps ppx_hardcaml ppx_jane)))

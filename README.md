@@ -8,6 +8,32 @@ For my submission I chose to solve both parts of day 4 from the 2025 calendar. Y
 
 For installation instructions, visit the respective READMEs for the [cpp source](2025/day04/cpp/README.md) and the [hardcaml source](2025/day04/hardcaml/README.md). 
 
+## Linting and Formatting
+
+### Dependency installation
+
+```bash
+# cpp source formatter / linter
+brew install clang-format # on mac
+sudo apt install clang-format # on linux
+
+# ocaml formatter / linter
+opam install -y ocamlformat
+```
+
+### Makefile Rules
+
+```bash
+# linting makefile rules
+make lint # lint all
+make lint-cpp # lint cpp specific files
+make lint-ocaml # lint ml or mli specific files
+
+# formatting makefile rules
+make format # format all
+make format-cpp # format cpp specific files
+make format-ocaml # format ml or mli specific files
+```
 
 #### Note:
 

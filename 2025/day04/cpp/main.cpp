@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (part1 == part2) {  // both true or both false
+  if (part1 == part2) { // both true or both false
     std::cerr << "Error: choose exactly one of --part1 or --part2.\n\n";
     print_usage(argv[0]);
     return 2;
@@ -54,5 +54,3 @@ int main(int argc, char** argv) {
   std::cout << ans << '\n';
   return 0;
 }
-
-

@@ -8,7 +8,7 @@
 struct Grid {
   int h = 0;
   int w = 0;
-  std::vector<std::uint8_t> cell;  // H * W
+  std::vector<std::uint8_t> cell; // H * W
 };
 
 Grid read_grid(std::istream& in);

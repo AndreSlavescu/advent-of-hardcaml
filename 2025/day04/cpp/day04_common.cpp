@@ -20,8 +20,7 @@ Grid read_grid(std::istream& in) {
   g.cell.assign(g.h * g.w, 0);
 
   for (int r = 0; r < g.h; ++r)
-    for (int c = 0; c < g.w; ++c)
-      g.cell[grid_index(r, c, g.w)] = (lines[r][c] == '@') ? 1 : 0;
+    for (int c = 0; c < g.w; ++c) g.cell[grid_index(r, c, g.w)] = (lines[r][c] == '@') ? 1 : 0;
 
   return g;
 }
@@ -35,9 +34,8 @@ std::vector<std::uint8_t> convolve_8_neighbors(const Grid& g) {
 
   for (int r = 0; r < g.h; ++r) {
     for (int c = 0; c < g.w; ++c) {
-      int sum = get(r-1, c-1) + get(r-1, c) + get(r-1, c+1)
-              + get(r,   c-1)              + get(r,   c+1)
-              + get(r+1, c-1) + get(r+1, c) + get(r+1, c+1);
+      int sum = get(r - 1, c - 1) + get(r - 1, c) + get(r - 1, c + 1) + get(r, c - 1) +
+                get(r, c + 1) + get(r + 1, c - 1) + get(r + 1, c) + get(r + 1, c + 1);
       out[grid_index(r, c, g.w)] = sum;
     }
   }
